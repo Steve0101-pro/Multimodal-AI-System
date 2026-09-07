@@ -6,6 +6,7 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Prevent multiple production deployments from running simultaneously.
 concurrency:
   group: production-deploy
   cancel-in-progress: true
@@ -16,19 +17,40 @@ permissions:
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   ECR_REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com
+
   API_REPOSITORY: ${{ vars.ECR_API_REPOSITORY }}
   UI_REPOSITORY: ${{ vars.ECR_UI_REPOSITORY }}
+
+# ============================================================
+# TEST, EVALUATION, DEPENDENCY AUDIT AND SECURITY SCANNING
+# ============================================================
 
 jobs:
   test:
     name: Test and scan source
     runs-on: ubuntu-24.04
+
     steps:
+      # --------------------------------------------------------
+      # Checkout
+      # --------------------------------------------------------
+
       - name: Check out source
         uses: actions/checkout@v4
 
+      # --------------------------------------------------------
+      # Install system dependencies
+      # --------------------------------------------------------
+
       - name: Install Tesseract OCR
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tesseract-ocr
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            tesseract-ocr
+
+      # --------------------------------------------------------
+      # Python
+      # --------------------------------------------------------
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -36,41 +58,97 @@ jobs:
           python-version: "3.10"
           cache: pip
 
+      # --------------------------------------------------------
+      # Install application dependencies + security tools
+      # --------------------------------------------------------
+
       - name: Install dependencies and scanners
-        run: python -m pip install -r requirements.txt pip-audit bandit
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            -r requirements.txt \
+            pip-audit \
+            bandit
+
+      # --------------------------------------------------------
+      # Run unit/integration tests
+      # --------------------------------------------------------
 
       - name: Run tests
         env:
           PYTHONPATH: .
+
           DATABASE_URL: postgresql+asyncpg://user:password@localhost:5432/document_intelligence
+
           NVIDIA_API_KEY: test-nvidia-key
           GROQ_API_KEY: test-groq-key
           GEMINI_API_KEY: test-gemini-key
+
           SUPABASE_URL: https://example.supabase.co
           SUPABASE_SERVICE_KEY: test-supabase-key
+
           JWT_SECRET_KEY: test-only-jwt-secret
-        run: python -m pytest -q
+
+        run: |
+          python -m pytest -q
+
+      # --------------------------------------------------------
+      # Offline evaluation gate
+      # --------------------------------------------------------
 
       - name: Run offline evaluation gate
-        run: python evals/run_offline.py evals/responses.example.json
+        run: |
+          python evals/run_offline.py \
+            evals/responses.example.json
+
+      # --------------------------------------------------------
+      # Dependency vulnerability audit
+      # --------------------------------------------------------
 
       - name: Audit Python dependencies
-        run: pip-audit
+        run: |
+          pip-audit
+
+      # --------------------------------------------------------
+      # Static application security scan
+      # --------------------------------------------------------
 
       - name: Run static security scan
-        run: bandit -r app -ll
+        run: |
+          bandit -r app -ll
+
+  # ============================================================
+  # BUILD DOCKER IMAGES
+  # TRIVY SECURITY SCAN
+  # PUSH TO AMAZON ECR
+  # ============================================================
 
   build:
     name: Build, scan, and push images
+
+    # Never build/push production images for pull requests.
     if: github.event_name != 'pull_request'
-    needs: test
+
+    needs:
+      - test
+
     runs-on: ubuntu-24.04
+
     permissions:
       contents: read
       id-token: write
+
     steps:
+      # --------------------------------------------------------
+      # Checkout
+      # --------------------------------------------------------
+
       - name: Check out source
         uses: actions/checkout@v4
+
+      # --------------------------------------------------------
+      # Configure AWS using GitHub OIDC
+      # --------------------------------------------------------
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -78,189 +156,462 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-to-assume: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
 
+      # --------------------------------------------------------
+      # Login to Amazon ECR
+      # --------------------------------------------------------
+
       - name: Log in to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      # --------------------------------------------------------
+      # Validate configuration and create image names
+      # --------------------------------------------------------
+
       - name: Set image names
         id: image
+
         run: |
-          set -eu
-          test -n "$AWS_REGION"
-          test -n "${{ vars.AWS_ACCOUNT_ID }}"
-          test -n "$API_REPOSITORY"
-          test -n "$UI_REPOSITORY"
-          echo "api=$ECR_REGISTRY/$API_REPOSITORY:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
-          echo "ui=$ECR_REGISTRY/$UI_REPOSITORY:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+
+          if [ -z "${AWS_REGION:-}" ]; then
+            echo "ERROR: AWS_REGION is empty."
+            exit 1
+          fi
+
+          if [ -z "${{ vars.AWS_ACCOUNT_ID }}" ]; then
+            echo "ERROR: AWS_ACCOUNT_ID is empty."
+            exit 1
+          fi
+
+          if [ -z "${API_REPOSITORY:-}" ]; then
+            echo "ERROR: ECR_API_REPOSITORY is empty."
+            exit 1
+          fi
+
+          if [ -z "${UI_REPOSITORY:-}" ]; then
+            echo "ERROR: ECR_UI_REPOSITORY is empty."
+            exit 1
+          fi
+
+          API_IMAGE="$ECR_REGISTRY/$API_REPOSITORY:${GITHUB_SHA}"
+          UI_IMAGE="$ECR_REGISTRY/$UI_REPOSITORY:${GITHUB_SHA}"
+
+          echo "api=$API_IMAGE" >> "$GITHUB_OUTPUT"
+          echo "ui=$UI_IMAGE" >> "$GITHUB_OUTPUT"
+
+          echo "API image: $API_IMAGE"
+          echo "UI image:  $UI_IMAGE"
+
+      # --------------------------------------------------------
+      # Docker Buildx
+      # --------------------------------------------------------
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # --------------------------------------------------------
+      # Build API image
+      # --------------------------------------------------------
+
       - name: Build API image
         uses: docker/build-push-action@v6
+
         with:
           context: .
           file: Dockerfile.api
+
           load: true
-          tags: ${{ steps.image.outputs.api }}
-          cache-from: type=gha,scope=api
-          cache-to: type=gha,mode=max,scope=api
+
+          tags: |
+            ${{ steps.image.outputs.api }}
+
+          cache-from: |
+            type=gha,scope=api
+
+          cache-to: |
+            type=gha,mode=max,scope=api
+
+      # --------------------------------------------------------
+      # Build UI image
+      # --------------------------------------------------------
 
       - name: Build UI image
         uses: docker/build-push-action@v6
+
         with:
           context: .
           file: Dockerfile.ui
+
           load: true
-          tags: ${{ steps.image.outputs.ui }}
-          cache-from: type=gha,scope=ui
-          cache-to: type=gha,mode=max,scope=ui
+
+          tags: |
+            ${{ steps.image.outputs.ui }}
+
+          cache-from: |
+            type=gha,scope=ui
+
+          cache-to: |
+            type=gha,mode=max,scope=ui
+
+      # --------------------------------------------------------
+      # Scan API image
+      # --------------------------------------------------------
 
       - name: Scan API image
         uses: aquasecurity/trivy-action@master
+
         with:
           image-ref: ${{ steps.image.outputs.api }}
+
           format: table
+
           vuln-type: os,library
+
           severity: CRITICAL,HIGH
+
           exit-code: 1
+
+      # --------------------------------------------------------
+      # Scan UI image
+      # --------------------------------------------------------
 
       - name: Scan UI image
         uses: aquasecurity/trivy-action@master
+
         with:
           image-ref: ${{ steps.image.outputs.ui }}
+
           format: table
+
           vuln-type: os,library
+
           severity: CRITICAL,HIGH
+
           exit-code: 1
 
+      # --------------------------------------------------------
+      # Push API image
+      # --------------------------------------------------------
+
       - name: Push API image
-        run: docker push "${{ steps.image.outputs.api }}"
+        run: |
+          set -euo pipefail
+
+          docker push "${{ steps.image.outputs.api }}"
+
+      # --------------------------------------------------------
+      # Push UI image
+      # --------------------------------------------------------
 
       - name: Push UI image
-        run: docker push "${{ steps.image.outputs.ui }}"
+        run: |
+          set -euo pipefail
+
+          docker push "${{ steps.image.outputs.ui }}"
+
+  # ============================================================
+  # DEPLOY TO AMAZON ECS FARGATE
+  # ============================================================
 
   deploy:
     name: Deploy to ECS Fargate
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    needs: build
+
+    if: |
+      github.ref == 'refs/heads/main' &&
+      github.event_name != 'pull_request'
+
+    needs:
+      - build
+
     runs-on: ubuntu-24.04
+
     permissions:
       contents: read
       id-token: write
+
     steps:
+      # --------------------------------------------------------
+      # Checkout
+      # --------------------------------------------------------
+
       - name: Check out source
         uses: actions/checkout@v4
 
+      # --------------------------------------------------------
+      # Install deployment utilities
+      # --------------------------------------------------------
+
       - name: Install deployment tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gettext-base jq
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y --no-install-recommends \
+            gettext-base \
+            jq
+
+      # --------------------------------------------------------
+      # Configure AWS
+      # --------------------------------------------------------
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
+
         with:
           aws-region: ${{ env.AWS_REGION }}
+
           role-to-assume: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+
+      # --------------------------------------------------------
+      # Login to Amazon ECR
+      # --------------------------------------------------------
 
       - name: Log in to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Render and register API task definition
-        id: api-task
+      # ========================================================
+      # DEPLOYMENT CONFIGURATION VALIDATION
+      # ========================================================
+
+      - name: Validate deployment configuration
         env:
           API_IMAGE: ${{ env.ECR_REGISTRY }}/${{ env.API_REPOSITORY }}:${{ github.sha }}
-          ECS_API_TASK_FAMILY: ${{ vars.ECS_API_TASK_FAMILY }}
-          ECS_API_CONTAINER_NAME: ${{ vars.ECS_API_CONTAINER_NAME }}
-          ECS_TASK_EXECUTION_ROLE_ARN: ${{ vars.ECS_TASK_EXECUTION_ROLE_ARN }}
-          ECS_API_LOG_GROUP: ${{ vars.ECS_API_LOG_GROUP }}
-          AWS_REGION: ${{ env.AWS_REGION }}
-          ENVIRONMENT: ${{ vars.ENVIRONMENT || 'production' }}
-          CORS_ORIGINS: ${{ vars.CORS_ORIGINS || 'https://your-ui-domain.example' }}
-          PORTKEYS_ENABLED: ${{ vars.PORTKEYS_ENABLED || 'false' }}
-          PORTKEYS_VIRTUAL_KEY: ${{ vars.PORTKEYS_VIRTUAL_KEY || '' }}
-          PORTKEYS_PRIMARY_CONFIG_ID: ${{ vars.PORTKEYS_PRIMARY_CONFIG_ID || '' }}
-          LANGCHAIN_TRACING_V2: ${{ vars.LANGCHAIN_TRACING_V2 || 'false' }}
-          LANGCHAIN_PROJECT: ${{ vars.LANGCHAIN_PROJECT || 'document-intelligence' }}
-          LANGCHAIN_ENDPOINT: ${{ vars.LANGCHAIN_ENDPOINT || 'https://api.smith.langchain.com' }}
-          PROMPT_VERSION: ${{ vars.PROMPT_VERSION || 'v1' }}
-          AB_TEST_ENABLED: ${{ vars.AB_TEST_ENABLED || 'false' }}
-          AB_TEST_VARIANTS: ${{ vars.AB_TEST_VARIANTS || 'control' }}
-          ONLINE_EVAL_ENABLED: ${{ vars.ONLINE_EVAL_ENABLED || 'false' }}
-          ONLINE_EVAL_SAMPLE_RATE: ${{ vars.ONLINE_EVAL_SAMPLE_RATE || '1.0' }}
-          SMTP_HOST: ${{ secrets.SMTP_HOST || vars.SMTP_HOST || '' }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT || vars.SMTP_PORT || '587' }}
-          SMTP_FROM_EMAIL: ${{ secrets.SMTP_FROM_EMAIL || vars.SMTP_FROM_EMAIL || '' }}
-          PASSWORD_RESET_EXPIRE_MINUTES: ${{ secrets.PASSWORD_RESET_EXPIRE_MINUTES || vars.PASSWORD_RESET_EXPIRE_MINUTES || '30' }}
-          DATABASE_URL_SECRET_ARN: ${{ secrets.DATABASE_URL_SECRET_ARN }}
-          REDIS_URL_SECRET_ARN: ${{ secrets.REDIS_URL_SECRET_ARN }}
-          JWT_SECRET_KEY_SECRET_ARN: ${{ secrets.JWT_SECRET_KEY_SECRET_ARN }}
-          NVIDIA_API_KEY_SECRET_ARN: ${{ secrets.NVIDIA_API_KEY_SECRET_ARN }}
-          GROQ_API_KEY_SECRET_ARN: ${{ secrets.GROQ_API_KEY_SECRET_ARN }}
-          GEMINI_API_KEY_SECRET_ARN: ${{ secrets.GEMINI_API_KEY_SECRET_ARN }}
-          SUPABASE_URL_SECRET_ARN: ${{ secrets.SUPABASE_URL_SECRET_ARN }}
-          SUPABASE_SERVICE_KEY_SECRET_ARN: ${{ secrets.SUPABASE_SERVICE_KEY_SECRET_ARN }}
-          OPENAI_API_KEY_SECRET_ARN: ${{ secrets.OPENAI_API_KEY_SECRET_ARN }}
-          PORTKEYS_API_KEY_SECRET_ARN: ${{ secrets.PORTKEYS_API_KEY_SECRET_ARN }}
-          LANGSMITH_API_KEY_SECRET_ARN: ${{ secrets.LANGSMITH_API_KEY_SECRET_ARN }}
-          SMTP_USERNAME_SECRET_ARN: ${{ secrets.SMTP_USERNAME_SECRET_ARN }}
-          SMTP_PASSWORD_SECRET_ARN: ${{ secrets.SMTP_PASSWORD_SECRET_ARN }}
-        run: |
-          set -eu
-          for variable in API_IMAGE ECS_API_TASK_FAMILY ECS_API_CONTAINER_NAME ECS_TASK_EXECUTION_ROLE_ARN ECS_API_LOG_GROUP AWS_REGION DATABASE_URL_SECRET_ARN REDIS_URL_SECRET_ARN JWT_SECRET_KEY_SECRET_ARN NVIDIA_API_KEY_SECRET_ARN GROQ_API_KEY_SECRET_ARN GEMINI_API_KEY_SECRET_ARN SUPABASE_URL_SECRET_ARN SUPABASE_SERVICE_KEY_SECRET_ARN OPENAI_API_KEY_SECRET_ARN PORTKEYS_API_KEY_SECRET_ARN LANGSMITH_API_KEY_SECRET_ARN SMTP_USERNAME_SECRET_ARN SMTP_PASSWORD_SECRET_ARN SMTP_HOST SMTP_PORT SMTP_FROM_EMAIL PASSWORD_RESET_EXPIRE_MINUTES; do
-            test -n "${!variable}" || { echo "Missing $variable"; exit 1; }
-          done
-          envsubst < ecs/api-task-definition.json > api-task-rendered.json
-          jq empty api-task-rendered.json
-          REVISION=$(aws ecs register-task-definition --cli-input-json file://api-task-rendered.json --query 'taskDefinition.taskDefinitionArn' --output text)
-          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
 
-      - name: Render and register UI task definition
-        id: ui-task
-        env:
           UI_IMAGE: ${{ env.ECR_REGISTRY }}/${{ env.UI_REPOSITORY }}:${{ github.sha }}
-          ECS_UI_TASK_FAMILY: ${{ vars.ECS_UI_TASK_FAMILY }}
-          ECS_UI_CONTAINER_NAME: ${{ vars.ECS_UI_CONTAINER_NAME }}
-          ECS_TASK_EXECUTION_ROLE_ARN: ${{ vars.ECS_TASK_EXECUTION_ROLE_ARN }}
-          AWS_REGION: ${{ env.AWS_REGION }}
-          ECS_API_BASE_URL: ${{ vars.ECS_API_BASE_URL }}
-        run: |
-          set -eu
-          for variable in UI_IMAGE ECS_UI_TASK_FAMILY ECS_UI_CONTAINER_NAME ECS_TASK_EXECUTION_ROLE_ARN AWS_REGION ECS_API_BASE_URL; do
-            test -n "${!variable}" || { echo "Missing $variable"; exit 1; }
-          done
-          envsubst < ecs/ui-task-definition.json > ui-task-rendered.json
-          jq empty ui-task-rendered.json
-          REVISION=$(aws ecs register-task-definition --cli-input-json file://ui-task-rendered.json --query 'taskDefinition.taskDefinitionArn' --output text)
-          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
 
-      - name: Run database migrations
+          ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+
+          ECS_API_TASK_FAMILY: ${{ vars.ECS_API_TASK_FAMILY }}
+
+          ECS_UI_TASK_FAMILY: ${{ vars.ECS_UI_TASK_FAMILY }}
+
+          ECS_API_CONTAINER_NAME: ${{ vars.ECS_API_CONTAINER_NAME }}
+
+          ECS_UI_CONTAINER_NAME: ${{ vars.ECS_UI_CONTAINER_NAME }}
+
+          ECS_API_SERVICE: ${{ vars.ECS_API_SERVICE }}
+
+          ECS_UI_SERVICE: ${{ vars.ECS_UI_SERVICE }}
+
+        run: |
+          set -euo pipefail
+
+          REQUIRED_VARS=(
+            AWS_REGION
+            API_IMAGE
+            UI_IMAGE
+            ECS_CLUSTER
+            ECS_API_TASK_FAMILY
+            ECS_UI_TASK_FAMILY
+            ECS_API_CONTAINER_NAME
+            ECS_UI_CONTAINER_NAME
+            ECS_API_SERVICE
+            ECS_UI_SERVICE
+          )
+
+          for var in "${REQUIRED_VARS[@]}"; do
+
+            if [ -z "${!var:-}" ]; then
+
+              echo "ERROR: Required deployment variable '$var' is empty."
+
+              exit 1
+
+            fi
+
+          done
+
+          echo "Deployment configuration validated successfully."
+
+      # ========================================================
+      # DOWNLOAD CURRENT ECS TASK DEFINITIONS
+      # ========================================================
+
+      - name: Download active API task definition
+        run: |
+          set -euo pipefail
+
+          aws ecs describe-task-definition \
+            --task-definition "${{ vars.ECS_API_TASK_FAMILY }}" \
+            --query taskDefinition \
+            --output json \
+            > task-def-api.json
+
+          echo "API task definition downloaded."
+
+          jq empty task-def-api.json
+
+      - name: Download active UI task definition
+        run: |
+          set -euo pipefail
+
+          aws ecs describe-task-definition \
+            --task-definition "${{ vars.ECS_UI_TASK_FAMILY }}" \
+            --query taskDefinition \
+            --output json \
+            > task-def-ui.json
+
+          echo "UI task definition downloaded."
+
+          jq empty task-def-ui.json
+
+      # ========================================================
+      # RENDER NEW API IMAGE
+      # ========================================================
+
+      - name: Render API task definition
+        id: render-api
+
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+
+        with:
+          task-definition: task-def-api.json
+
+          container-name: ${{ vars.ECS_API_CONTAINER_NAME }}
+
+          image: ${{ env.ECR_REGISTRY }}/${{ env.API_REPOSITORY }}:${{ github.sha }}
+
+      # ========================================================
+      # RENDER NEW UI IMAGE
+      # ========================================================
+
+      - name: Render UI task definition
+        id: render-ui
+
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+
+        with:
+          task-definition: task-def-ui.json
+
+          container-name: ${{ vars.ECS_UI_CONTAINER_NAME }}
+
+          image: ${{ env.ECR_REGISTRY }}/${{ env.UI_REPOSITORY }}:${{ github.sha }}
+
+      # ========================================================
+      # SHOW RENDERED API TASK DEFINITION
+      # Useful for debugging deployments.
+      # ========================================================
+
+      - name: Validate rendered API task definition
+        run: |
+          set -euo pipefail
+
+          jq empty "${{ steps.render-api.outputs.task-definition }}"
+
+          echo "Rendered API task definition is valid JSON."
+
+      # ========================================================
+      # SHOW RENDERED UI TASK DEFINITION
+      # ========================================================
+
+      - name: Validate rendered UI task definition
+        run: |
+          set -euo pipefail
+
+          jq empty "${{ steps.render-ui.outputs.task-definition }}"
+
+          echo "Rendered UI task definition is valid JSON."
+
+      # ========================================================
+      # DEPLOY API TO ECS
+      # ========================================================
+
+      - name: Deploy Amazon ECS API Service
+
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+
+        with:
+          task-definition: ${{ steps.render-api.outputs.task-definition }}
+
+          service: ${{ vars.ECS_API_SERVICE }}
+
+          cluster: ${{ vars.ECS_CLUSTER }}
+
+          wait-for-service-stability: true
+
+      # ========================================================
+      # DEPLOY UI TO ECS
+      # ========================================================
+
+      - name: Deploy Amazon ECS UI Service
+
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+
+        with:
+          task-definition: ${{ steps.render-ui.outputs.task-definition }}
+
+          service: ${{ vars.ECS_UI_SERVICE }}
+
+          cluster: ${{ vars.ECS_CLUSTER }}
+
+          wait-for-service-stability: true
+
+      # ========================================================
+      # POST-DEPLOYMENT ECS VERIFICATION
+      # ========================================================
+
+      - name: Verify ECS API service
         env:
           CLUSTER: ${{ vars.ECS_CLUSTER }}
-          TASK_DEFINITION: ${{ steps.api-task.outputs.revision }}
-          CONTAINER: ${{ vars.ECS_API_CONTAINER_NAME }}
-          SUBNETS: ${{ vars.ECS_PRIVATE_SUBNET_IDS }}
-          SECURITY_GROUP: ${{ vars.ECS_SECURITY_GROUP_ID }}
+          SERVICE: ${{ vars.ECS_API_SERVICE }}
+
         run: |
-          set -eu
-          test -n "$SUBNETS"
-          test -n "$SECURITY_GROUP"
-          TASK_ARN=$(aws ecs run-task \
+          set -euo pipefail
+
+          echo "Checking API ECS service..."
+
+          aws ecs describe-services \
             --cluster "$CLUSTER" \
-            --launch-type FARGATE \
-            --task-definition "$TASK_DEFINITION" \
-            --network-configuration "awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SECURITY_GROUP],assignPublicIp=DISABLED}" \
-            --overrides "{\"containerOverrides\":[{\"name\":\"$CONTAINER\",\"command\":[\"alembic\",\"upgrade\",\"head\"]}]}" \
-            --query 'tasks[0].taskArn' --output text)
-          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK_ARN"
-          EXIT_CODE=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" --query "tasks[0].containers[?name=='$CONTAINER'].exitCode | [0]" --output text)
-          test "$EXIT_CODE" = "0" || { echo "Database migration failed with exit code $EXIT_CODE"; exit 1; }
+            --services "$SERVICE" \
+            --query 'services[0].{status:status,running:runningCount,desired:desiredCount,pending:pendingCount}' \
+            --output table
 
-      - name: Update API service
-        run: aws ecs update-service --cluster "${{ vars.ECS_CLUSTER }}" --service "${{ vars.ECS_API_SERVICE }}" --task-definition "${{ steps.api-task.outputs.revision }}" --force-new-deployment
+      - name: Verify ECS UI service
+        env:
+          CLUSTER: ${{ vars.ECS_CLUSTER }}
+          SERVICE: ${{ vars.ECS_UI_SERVICE }}
 
-      - name: Update UI service
-        run: aws ecs update-service --cluster "${{ vars.ECS_CLUSTER }}" --service "${{ vars.ECS_UI_SERVICE }}" --task-definition "${{ steps.ui-task.outputs.revision }}" --force-new-deployment
+        run: |
+          set -euo pipefail
 
-      - name: Wait for API deployment
-        run: aws ecs wait services-stable --cluster "${{ vars.ECS_CLUSTER }}" --services "${{ vars.ECS_API_SERVICE }}"
+          echo "Checking UI ECS service..."
 
-      - name: Wait for UI deployment
-        run: aws ecs wait services-stable --cluster "${{ vars.ECS_CLUSTER }}" --services "${{ vars.ECS_UI_SERVICE }}"
+          aws ecs describe-services \
+            --cluster "$CLUSTER" \
+            --services "$SERVICE" \
+            --query 'services[0].{status:status,running:runningCount,desired:desiredCount,pending:pendingCount}' \
+            --output table
+
+      # ========================================================
+      # DEPLOYMENT SUMMARY
+      # ========================================================
+
+      - name: Deployment summary
+        env:
+          API_IMAGE: ${{ env.ECR_REGISTRY }}/${{ env.API_REPOSITORY }}:${{ github.sha }}
+          UI_IMAGE: ${{ env.ECR_REGISTRY }}/${{ env.UI_REPOSITORY }}:${{ github.sha }}
+
+        run: |
+          echo ""
+          echo "============================================================"
+          echo "DOCUMENT INTELLIGENCE DEPLOYMENT SUCCESSFUL"
+          echo "============================================================"
+          echo ""
+          echo "Commit:"
+          echo "${GITHUB_SHA}"
+          echo ""
+          echo "API Image:"
+          echo "${API_IMAGE}"
+          echo ""
+          echo "UI Image:"
+          echo "${UI_IMAGE}"
+          echo ""
+          echo "ECS Cluster:"
+          echo "${{ vars.ECS_CLUSTER }}"
+          echo ""
+          echo "API Service:"
+          echo "${{ vars.ECS_API_SERVICE }}"
+          echo ""
+          echo "UI Service:"
+          echo "${{ vars.ECS_UI_SERVICE }}"
+          echo ""
+          echo "============================================================"
