@@ -1,0 +1,46 @@
+# Services run by the production or EC2 host.
+services:
+  # FastAPI backend. The image is built by GitHub Actions and pulled from Docker Hub.
+  api:
+    # IMAGE_TAG can be a commit SHA for a repeatable deployment; latest is the fallback.
+    image: ${DOCKER_IMAGE:?DOCKER_IMAGE must be set}-api:${IMAGE_TAG:-latest}
+    # API secrets and database/provider settings are kept in the server-side .env file.
+    env_file: ${APP_ENV_FILE:-.env}
+    # Keep the API private; expose it through the HTTPS reverse proxy.
+    ports:
+      - "127.0.0.1:8000:8000"
+    # Restart automatically after crashes or host restarts.
+    restart: unless-stopped
+    # Run migrations before the API process in the production image.
+    command: >-
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    # The UI waits for this health check before it starts sending requests.
+    healthcheck:
+      test:
+        # Use Python, already present in the image, to call the API health endpoint.
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/', timeout=5)",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # Streamlit frontend. This image is also published to Docker Hub by CI/CD.
+  ui:
+    image: ${DOCKER_IMAGE:?DOCKER_IMAGE must be set}-ui:${IMAGE_TAG:-latest}
+    # Inside Compose, the API is reachable through the service name "api".
+    environment:
+      API_URL: http://api:8000
+      API_TIMEOUT_SECONDS: 180
+    # Keep the UI behind the HTTPS reverse proxy as well.
+    ports:
+      - "127.0.0.1:8501:8501"
+    # Start the UI only after the backend reports healthy.
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped

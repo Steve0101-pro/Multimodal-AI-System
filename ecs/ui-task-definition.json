@@ -1,0 +1,51 @@
+{
+  "family": "${ECS_UI_TASK_FAMILY}",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "${ECS_TASK_EXECUTION_ROLE_ARN}",
+  "containerDefinitions": [
+    {
+      "name": "${ECS_UI_CONTAINER_NAME}",
+      "image": "${UI_IMAGE}",
+      "command": [
+        "streamlit",
+        "run",
+        "streamlit_app.py",
+        "--server.address=0.0.0.0",
+        "--server.port=8501",
+        "--server.headless=true"
+      ],
+      "portMappings": [
+        {
+          "containerPort": 8501,
+          "hostPort": 8501,
+          "protocol": "tcp"
+        }
+      ],
+      "essential": true,
+      "environment": [
+        {"name": "API_URL", "value": "${ECS_API_BASE_URL}"},
+        {"name": "API_TIMEOUT_SECONDS", "value": "180"},
+        {"name": "PYTHONUNBUFFERED", "value": "1"}
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/document-intelligence-ui",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "ui",
+          "awslogs-create-group": "true"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=3)\""],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 30
+      }
+    }
+  ]
+}

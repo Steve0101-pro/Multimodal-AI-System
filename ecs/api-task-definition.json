@@ -1,0 +1,68 @@
+{
+  "family": "${ECS_API_TASK_FAMILY}",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "${ECS_TASK_EXECUTION_ROLE_ARN}",
+  "containerDefinitions": [
+    {
+      "name": "${ECS_API_CONTAINER_NAME}",
+      "image": "${API_IMAGE}",
+      "command": ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "5"],
+      "portMappings": [{"containerPort": 8000, "hostPort": 8000, "protocol": "tcp"}],
+      "essential": true,
+      "environment": [
+        {"name": "ENVIRONMENT", "value": "${ENVIRONMENT}"},
+        {"name": "CORS_ORIGINS", "value": "${CORS_ORIGINS}"},
+        {"name": "PORTKEYS_ENABLED", "value": "${PORTKEYS_ENABLED}"},
+        {"name": "PORTKEYS_VIRTUAL_KEY", "value": "${PORTKEYS_VIRTUAL_KEY}"},
+        {"name": "PORTKEYS_PRIMARY_CONFIG_ID", "value": "${PORTKEYS_PRIMARY_CONFIG_ID}"},
+        {"name": "LANGCHAIN_TRACING_V2", "value": "${LANGCHAIN_TRACING_V2}"},
+        {"name": "LANGCHAIN_PROJECT", "value": "${LANGCHAIN_PROJECT}"},
+        {"name": "LANGCHAIN_ENDPOINT", "value": "${LANGCHAIN_ENDPOINT}"},
+        {"name": "PROMPT_VERSION", "value": "${PROMPT_VERSION}"},
+        {"name": "AB_TEST_ENABLED", "value": "${AB_TEST_ENABLED}"},
+        {"name": "AB_TEST_VARIANTS", "value": "${AB_TEST_VARIANTS}"},
+        {"name": "ONLINE_EVAL_ENABLED", "value": "${ONLINE_EVAL_ENABLED}"},
+        {"name": "ONLINE_EVAL_SAMPLE_RATE", "value": "${ONLINE_EVAL_SAMPLE_RATE}"},
+        {"name": "SMTP_HOST", "value": "${SMTP_HOST}"},
+        {"name": "SMTP_PORT", "value": "${SMTP_PORT}"},
+        {"name": "SMTP_FROM_EMAIL", "value": "${SMTP_FROM_EMAIL}"},
+        {"name": "PASSWORD_RESET_EXPIRE_MINUTES", "value": "${PASSWORD_RESET_EXPIRE_MINUTES}"},
+        {"name": "PYTHONUNBUFFERED", "value": "1"}
+      ],
+      "secrets": [
+        {"name": "DATABASE_URL", "valueFrom": "${DATABASE_URL_SECRET_ARN}"},
+        {"name": "REDIS_URL", "valueFrom": "${REDIS_URL_SECRET_ARN}"},
+        {"name": "JWT_SECRET_KEY", "valueFrom": "${JWT_SECRET_KEY_SECRET_ARN}"},
+        {"name": "NVIDIA_API_KEY", "valueFrom": "${NVIDIA_API_KEY_SECRET_ARN}"},
+        {"name": "GROQ_API_KEY", "valueFrom": "${GROQ_API_KEY_SECRET_ARN}"},
+        {"name": "GEMINI_API_KEY", "valueFrom": "${GEMINI_API_KEY_SECRET_ARN}"},
+        {"name": "SUPABASE_URL", "valueFrom": "${SUPABASE_URL_SECRET_ARN}"},
+        {"name": "SUPABASE_SERVICE_KEY", "valueFrom": "${SUPABASE_SERVICE_KEY_SECRET_ARN}"},
+        {"name": "OPENAI_API_KEY", "valueFrom": "${OPENAI_API_KEY_SECRET_ARN}"},
+        {"name": "PORTKEYS_API_KEY", "valueFrom": "${PORTKEYS_API_KEY_SECRET_ARN}"},
+        {"name": "LANGSMITH_API_KEY", "valueFrom": "${LANGSMITH_API_KEY_SECRET_ARN}"},
+        {"name": "SMTP_USERNAME", "valueFrom": "${SMTP_USERNAME_SECRET_ARN}"},
+        {"name": "SMTP_PASSWORD", "valueFrom": "${SMTP_PASSWORD_SECRET_ARN}"}
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "${ECS_API_LOG_GROUP}",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "api",
+          "awslogs-create-group": "true"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/', timeout=3)\""],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 30
+      }
+    }
+  ]
+}

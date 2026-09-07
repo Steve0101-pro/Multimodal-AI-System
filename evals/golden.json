@@ -1,0 +1,13 @@
+[
+  {
+    "id": "invoice-total-001",
+    "input": "What is the invoice total?",
+    "expected_contains": ["total"],
+    "must_not_contain": ["cannot determine"]
+  },
+  {
+    "id": "uncertain-001",
+    "input": "What information is missing from this document?",
+    "expected_contains": ["missing"]
+  }
+]

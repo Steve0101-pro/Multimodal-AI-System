@@ -1,0 +1,2 @@
+# Reserved for non-secret project parameters shared by local tooling or deployment scripts.
+# Keep passwords, API keys, JWT secrets, and database credentials in .env instead.
