@@ -17,7 +17,6 @@ permissions:
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   ECR_REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com
-
   API_REPOSITORY: ${{ vars.ECR_API_REPOSITORY }}
   UI_REPOSITORY: ${{ vars.ECR_UI_REPOSITORY }}
 
@@ -148,9 +147,10 @@ jobs:
         uses: actions/checkout@v4
 
       # --------------------------------------------------------
-      # Configure AWS using GitHub OIDC
+      # Configure AWS
       # --------------------------------------------------------
 
+      # Keeping your existing AWS access-key authentication.
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -195,6 +195,7 @@ jobs:
             exit 1
           fi
 
+          # Immutable Git SHA image tags.
           API_IMAGE="$ECR_REGISTRY/$API_REPOSITORY:${GITHUB_SHA}"
           UI_IMAGE="$ECR_REGISTRY/$UI_REPOSITORY:${GITHUB_SHA}"
 
@@ -217,19 +218,14 @@ jobs:
 
       - name: Build API image
         uses: docker/build-push-action@v6
-
         with:
           context: .
           file: Dockerfile.api
-
           load: true
-
           tags: |
             ${{ steps.image.outputs.api }}
-
           cache-from: |
             type=gha,scope=api
-
           cache-to: |
             type=gha,mode=max,scope=api
 
@@ -239,19 +235,14 @@ jobs:
 
       - name: Build UI image
         uses: docker/build-push-action@v6
-
         with:
           context: .
           file: Dockerfile.ui
-
           load: true
-
           tags: |
             ${{ steps.image.outputs.ui }}
-
           cache-from: |
             type=gha,scope=ui
-
           cache-to: |
             type=gha,mode=max,scope=ui
 
@@ -261,16 +252,11 @@ jobs:
 
       - name: Scan API image
         uses: aquasecurity/trivy-action@master
-
         with:
           image-ref: ${{ steps.image.outputs.api }}
-
           format: table
-
           vuln-type: os,library
-
           severity: CRITICAL,HIGH
-
           exit-code: 0
 
       # --------------------------------------------------------
@@ -279,37 +265,38 @@ jobs:
 
       - name: Scan UI image
         uses: aquasecurity/trivy-action@master
-
         with:
           image-ref: ${{ steps.image.outputs.ui }}
-
           format: table
-
           vuln-type: os,library
-
           severity: CRITICAL,HIGH
-
           exit-code: 0
 
-      # --------------------------------------------------------
-      # Push API image
-      # --------------------------------------------------------
+      # ========================================================
+      # PUSH IMMUTABLE IMAGES TO AMAZON ECR
+      # ========================================================
 
       - name: Push API image
         run: |
           set -euo pipefail
 
+          echo "Pushing API image..."
+          echo "${{ steps.image.outputs.api }}"
+
           docker push "${{ steps.image.outputs.api }}"
 
-      # --------------------------------------------------------
-      # Push UI image
-      # --------------------------------------------------------
+          echo "API image pushed successfully."
 
       - name: Push UI image
         run: |
           set -euo pipefail
 
+          echo "Pushing UI image..."
+          echo "${{ steps.image.outputs.ui }}"
+
           docker push "${{ steps.image.outputs.ui }}"
+
+          echo "UI image pushed successfully."
 
   # ============================================================
   # DEPLOY TO AMAZON ECS FARGATE
@@ -355,9 +342,9 @@ jobs:
       # Configure AWS
       # --------------------------------------------------------
 
+      # Keeping your existing AWS access-key authentication.
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
-
         with:
           aws-region: ${{ env.AWS_REGION }}
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -377,21 +364,17 @@ jobs:
       - name: Validate deployment configuration
         env:
           API_IMAGE: ${{ env.ECR_REGISTRY }}/${{ env.API_REPOSITORY }}:${{ github.sha }}
-
           UI_IMAGE: ${{ env.ECR_REGISTRY }}/${{ env.UI_REPOSITORY }}:${{ github.sha }}
 
           ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
 
           ECS_API_TASK_FAMILY: ${{ vars.ECS_API_TASK_FAMILY }}
-
           ECS_UI_TASK_FAMILY: ${{ vars.ECS_UI_TASK_FAMILY }}
 
           ECS_API_CONTAINER_NAME: ${{ vars.ECS_API_CONTAINER_NAME }}
-
           ECS_UI_CONTAINER_NAME: ${{ vars.ECS_UI_CONTAINER_NAME }}
 
           ECS_API_SERVICE: ${{ vars.ECS_API_SERVICE }}
-
           ECS_UI_SERVICE: ${{ vars.ECS_UI_SERVICE }}
 
         run: |
@@ -411,15 +394,10 @@ jobs:
           )
 
           for var in "${REQUIRED_VARS[@]}"; do
-
             if [ -z "${!var:-}" ]; then
-
               echo "ERROR: Required deployment variable '$var' is empty."
-
               exit 1
-
             fi
-
           done
 
           echo "Deployment configuration validated successfully."
@@ -462,14 +440,10 @@ jobs:
 
       - name: Render API task definition
         id: render-api
-
         uses: aws-actions/amazon-ecs-render-task-definition@v1
-
         with:
           task-definition: task-def-api.json
-
           container-name: ${{ vars.ECS_API_CONTAINER_NAME }}
-
           image: ${{ env.ECR_REGISTRY }}/${{ env.API_REPOSITORY }}:${{ github.sha }}
 
       # ========================================================
@@ -478,19 +452,14 @@ jobs:
 
       - name: Render UI task definition
         id: render-ui
-
         uses: aws-actions/amazon-ecs-render-task-definition@v1
-
         with:
           task-definition: task-def-ui.json
-
           container-name: ${{ vars.ECS_UI_CONTAINER_NAME }}
-
           image: ${{ env.ECR_REGISTRY }}/${{ env.UI_REPOSITORY }}:${{ github.sha }}
 
       # ========================================================
-      # SHOW RENDERED API TASK DEFINITION
-      # Useful for debugging deployments.
+      # VALIDATE RENDERED API TASK DEFINITION
       # ========================================================
 
       - name: Validate rendered API task definition
@@ -502,7 +471,7 @@ jobs:
           echo "Rendered API task definition is valid JSON."
 
       # ========================================================
-      # SHOW RENDERED UI TASK DEFINITION
+      # VALIDATE RENDERED UI TASK DEFINITION
       # ========================================================
 
       - name: Validate rendered UI task definition
@@ -518,16 +487,11 @@ jobs:
       # ========================================================
 
       - name: Deploy Amazon ECS API Service
-
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-
         with:
           task-definition: ${{ steps.render-api.outputs.task-definition }}
-
           service: ${{ vars.ECS_API_SERVICE }}
-
           cluster: ${{ vars.ECS_CLUSTER }}
-
           wait-for-service-stability: true
 
       # ========================================================
@@ -535,16 +499,11 @@ jobs:
       # ========================================================
 
       - name: Deploy Amazon ECS UI Service
-
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-
         with:
           task-definition: ${{ steps.render-ui.outputs.task-definition }}
-
           service: ${{ vars.ECS_UI_SERVICE }}
-
           cluster: ${{ vars.ECS_CLUSTER }}
-
           wait-for-service-stability: true
 
       # ========================================================
