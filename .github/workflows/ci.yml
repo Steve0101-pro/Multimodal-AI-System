@@ -30,26 +30,13 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      # --------------------------------------------------------
-      # Checkout
-      # --------------------------------------------------------
-
       - name: Check out source
         uses: actions/checkout@v4
-
-      # --------------------------------------------------------
-      # Install system dependencies
-      # --------------------------------------------------------
 
       - name: Install Tesseract OCR
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            tesseract-ocr
-
-      # --------------------------------------------------------
-      # Python
-      # --------------------------------------------------------
+          sudo apt-get install -y --no-install-recommends tesseract-ocr
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -57,100 +44,54 @@ jobs:
           python-version: "3.10"
           cache: pip
 
-      # --------------------------------------------------------
-      # Install application dependencies + security tools
-      # --------------------------------------------------------
-
       - name: Install dependencies and scanners
         run: |
           python -m pip install --upgrade pip
-          python -m pip install \
-            -r requirements.txt \
-            pip-audit \
-            bandit
-
-      # --------------------------------------------------------
-      # Run unit/integration tests
-      # --------------------------------------------------------
+          python -m pip install -r requirements.txt pip-audit bandit
 
       - name: Run tests
         env:
           PYTHONPATH: .
-
           DATABASE_URL: postgresql+asyncpg://user:password@localhost:5432/document_intelligence
-
           NVIDIA_API_KEY: test-nvidia-key
           GROQ_API_KEY: test-groq-key
           GEMINI_API_KEY: test-gemini-key
-
           SUPABASE_URL: https://example.supabase.co
           SUPABASE_SERVICE_KEY: test-supabase-key
-
           JWT_SECRET_KEY: test-only-jwt-secret
-
         run: |
           python -m pytest -q
 
-      # --------------------------------------------------------
-      # Offline evaluation gate
-      # --------------------------------------------------------
-
       - name: Run offline evaluation gate
         run: |
-          python evals/run_offline.py \
-            evals/responses.example.json
-
-      # --------------------------------------------------------
-      # Dependency vulnerability audit
-      # --------------------------------------------------------
+          python evals/run_offline.py evals/responses.example.json
 
       - name: Audit Python dependencies
         continue-on-error: true
         run: |
           pip-audit
 
-      # --------------------------------------------------------
-      # Static application security scan
-      # --------------------------------------------------------
-
       - name: Run static security scan
         run: |
           bandit -r app -ll
 
   # ============================================================
-  # BUILD DOCKER IMAGES
-  # TRIVY SECURITY SCAN
-  # PUSH TO AMAZON ECR
+  # BUILD DOCKER IMAGES, SECURITY SCAN, PUSH TO AMAZON ECR
   # ============================================================
 
   build:
     name: Build, scan, and push images
-
-    # Never build/push production images for pull requests.
     if: github.event_name != 'pull_request'
-
-    needs:
-      - test
-
+    needs: [test]
     runs-on: ubuntu-24.04
-
     permissions:
       contents: read
       id-token: write
 
     steps:
-      # --------------------------------------------------------
-      # Checkout
-      # --------------------------------------------------------
-
       - name: Check out source
         uses: actions/checkout@v4
 
-      # --------------------------------------------------------
-      # Configure AWS
-      # --------------------------------------------------------
-
-      # Keeping your existing AWS access-key authentication.
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -158,63 +99,20 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-      # --------------------------------------------------------
-      # Login to Amazon ECR
-      # --------------------------------------------------------
-
       - name: Log in to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      # --------------------------------------------------------
-      # Validate configuration and create image names
-      # --------------------------------------------------------
-
       - name: Set image names
         id: image
-
         run: |
           set -euo pipefail
-
-          if [ -z "${AWS_REGION:-}" ]; then
-            echo "ERROR: AWS_REGION is empty."
-            exit 1
-          fi
-
-          if [ -z "${{ vars.AWS_ACCOUNT_ID }}" ]; then
-            echo "ERROR: AWS_ACCOUNT_ID is empty."
-            exit 1
-          fi
-
-          if [ -z "${API_REPOSITORY:-}" ]; then
-            echo "ERROR: ECR_API_REPOSITORY is empty."
-            exit 1
-          fi
-
-          if [ -z "${UI_REPOSITORY:-}" ]; then
-            echo "ERROR: ECR_UI_REPOSITORY is empty."
-            exit 1
-          fi
-
-          # Immutable Git SHA image tags.
           API_IMAGE="$ECR_REGISTRY/$API_REPOSITORY:${GITHUB_SHA}"
           UI_IMAGE="$ECR_REGISTRY/$UI_REPOSITORY:${GITHUB_SHA}"
-
           echo "api=$API_IMAGE" >> "$GITHUB_OUTPUT"
           echo "ui=$UI_IMAGE" >> "$GITHUB_OUTPUT"
 
-          echo "API image: $API_IMAGE"
-          echo "UI image:  $UI_IMAGE"
-
-      # --------------------------------------------------------
-      # Docker Buildx
-      # --------------------------------------------------------
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      # --------------------------------------------------------
-      # Build API image
-      # --------------------------------------------------------
 
       - name: Build API image
         uses: docker/build-push-action@v6
@@ -222,16 +120,9 @@ jobs:
           context: .
           file: Dockerfile.api
           load: true
-          tags: |
-            ${{ steps.image.outputs.api }}
-          cache-from: |
-            type=gha,scope=api
-          cache-to: |
-            type=gha,mode=max,scope=api
-
-      # --------------------------------------------------------
-      # Build UI image
-      # --------------------------------------------------------
+          tags: ${{ steps.image.outputs.api }}
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
 
       - name: Build UI image
         uses: docker/build-push-action@v6
@@ -239,16 +130,9 @@ jobs:
           context: .
           file: Dockerfile.ui
           load: true
-          tags: |
-            ${{ steps.image.outputs.ui }}
-          cache-from: |
-            type=gha,scope=ui
-          cache-to: |
-            type=gha,mode=max,scope=ui
-
-      # --------------------------------------------------------
-      # Scan API image
-      # --------------------------------------------------------
+          tags: ${{ steps.image.outputs.ui }}
+          cache-from: type=gha,scope=ui
+          cache-to: type=gha,mode=max,scope=ui
 
       - name: Scan API image
         uses: aquasecurity/trivy-action@master
@@ -259,10 +143,6 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: 0
 
-      # --------------------------------------------------------
-      # Scan UI image
-      # --------------------------------------------------------
-
       - name: Scan UI image
         uses: aquasecurity/trivy-action@master
         with:
@@ -272,31 +152,19 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: 0
 
-      # ========================================================
-      # PUSH IMMUTABLE IMAGES TO AMAZON ECR
-      # ========================================================
-
       - name: Push API image
         run: |
           set -euo pipefail
-
-          echo "Pushing API image..."
-          echo "${{ steps.image.outputs.api }}"
-
+          docker tag "${{ steps.image.outputs.api }}" "${{ env.ECR_REGISTRY }}/${{ env.API_REPOSITORY }}:latest"
           docker push "${{ steps.image.outputs.api }}"
-
-          echo "API image pushed successfully."
+          docker push "${{ env.ECR_REGISTRY }}/${{ env.API_REPOSITORY }}:latest"
 
       - name: Push UI image
         run: |
           set -euo pipefail
-
-          echo "Pushing UI image..."
-          echo "${{ steps.image.outputs.ui }}"
-
+          docker tag "${{ steps.image.outputs.ui }}" "${{ env.ECR_REGISTRY }}/${{ env.UI_REPOSITORY }}:latest"
           docker push "${{ steps.image.outputs.ui }}"
-
-          echo "UI image pushed successfully."
+          docker push "${{ env.ECR_REGISTRY }}/${{ env.UI_REPOSITORY }}:latest"
 
   # ============================================================
   # DEPLOY TO AMAZON ECS FARGATE
@@ -304,45 +172,22 @@ jobs:
 
   deploy:
     name: Deploy to ECS Fargate
-
-    if: |
-      github.ref == 'refs/heads/main' &&
-      github.event_name != 'pull_request'
-
-    needs:
-      - build
-
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: [build]
     runs-on: ubuntu-24.04
-
     permissions:
       contents: read
       id-token: write
 
     steps:
-      # --------------------------------------------------------
-      # Checkout
-      # --------------------------------------------------------
-
       - name: Check out source
         uses: actions/checkout@v4
-
-      # --------------------------------------------------------
-      # Install deployment utilities
-      # --------------------------------------------------------
 
       - name: Install deployment tools
         run: |
           sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gettext-base jq
 
-          sudo apt-get install -y --no-install-recommends \
-            gettext-base \
-            jq
-
-      # --------------------------------------------------------
-      # Configure AWS
-      # --------------------------------------------------------
-
-      # Keeping your existing AWS access-key authentication.
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -350,93 +195,101 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-      # --------------------------------------------------------
-      # Login to Amazon ECR
-      # --------------------------------------------------------
-
       - name: Log in to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
-
-      # ========================================================
-      # DEPLOYMENT CONFIGURATION VALIDATION
-      # ========================================================
 
       - name: Validate deployment configuration
         env:
           API_IMAGE: ${{ env.ECR_REGISTRY }}/${{ env.API_REPOSITORY }}:${{ github.sha }}
           UI_IMAGE: ${{ env.ECR_REGISTRY }}/${{ env.UI_REPOSITORY }}:${{ github.sha }}
-
           ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
-
           ECS_API_TASK_FAMILY: ${{ vars.ECS_API_TASK_FAMILY }}
           ECS_UI_TASK_FAMILY: ${{ vars.ECS_UI_TASK_FAMILY }}
-
           ECS_API_CONTAINER_NAME: ${{ vars.ECS_API_CONTAINER_NAME }}
           ECS_UI_CONTAINER_NAME: ${{ vars.ECS_UI_CONTAINER_NAME }}
-
           ECS_API_SERVICE: ${{ vars.ECS_API_SERVICE }}
           ECS_UI_SERVICE: ${{ vars.ECS_UI_SERVICE }}
-
+          ECS_API_BASE_URL: ${{ secrets.ECS_API_BASE_URL || 'http://107.21.90.181:8000' }}
+          ECS_UI_API_URL: ${{ secrets.ECS_UI_API_URL || 'http://107.21.90.181:8501' }}
         run: |
           set -euo pipefail
-
-          REQUIRED_VARS=(
-            AWS_REGION
-            API_IMAGE
-            UI_IMAGE
-            ECS_CLUSTER
-            ECS_API_TASK_FAMILY
-            ECS_UI_TASK_FAMILY
-            ECS_API_CONTAINER_NAME
-            ECS_UI_CONTAINER_NAME
-            ECS_API_SERVICE
-            ECS_UI_SERVICE
-          )
-
-          for var in "${REQUIRED_VARS[@]}"; do
-            if [ -z "${!var:-}" ]; then
-              echo "ERROR: Required deployment variable '$var' is empty."
-              exit 1
-            fi
-          done
-
           echo "Deployment configuration validated successfully."
-
-      # ========================================================
-      # DOWNLOAD CURRENT ECS TASK DEFINITIONS
-      # ========================================================
 
       - name: Download active API task definition
         run: |
           set -euo pipefail
-
-          aws ecs describe-task-definition \
-            --task-definition "${{ vars.ECS_API_TASK_FAMILY }}" \
-            --query taskDefinition \
-            --output json \
-            > task-def-api.json
-
-          echo "API task definition downloaded."
-
-          jq empty task-def-api.json
+          aws ecs describe-task-definition --task-definition "${{ vars.ECS_API_TASK_FAMILY }}" --query taskDefinition --output json > task-def-api.json
 
       - name: Download active UI task definition
         run: |
           set -euo pipefail
+          aws ecs describe-task-definition --task-definition "${{ vars.ECS_UI_TASK_FAMILY }}" --query taskDefinition --output json > task-def-ui.json
 
-          aws ecs describe-task-definition \
-            --task-definition "${{ vars.ECS_UI_TASK_FAMILY }}" \
-            --query taskDefinition \
-            --output json \
-            > task-def-ui.json
+      - name: Configure API task definition environment
+        env:
+          API_IMAGE: ${{ env.ECR_REGISTRY }}/${{ env.API_REPOSITORY }}:${{ github.sha }}
+          ECS_API_CONTAINER_NAME: ${{ vars.ECS_API_CONTAINER_NAME }}
+          ENVIRONMENT: ${{ vars.ENVIRONMENT || 'production' }}
+          ECS_API_BASE_URL: ${{ secrets.ECS_API_BASE_URL || 'http://107.21.90.181:8000' }}
+          CORS_ORIGINS: ${{ secrets.CORS_ORIGINS || 'http://107.21.90.181' }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          set -euo pipefail
+          jq \
+            --arg image "$API_IMAGE" \
+            --arg container "$ECS_API_CONTAINER_NAME" \
+            --arg environment "$ENVIRONMENT" \
+            --arg api_url "$ECS_API_BASE_URL" \
+            --arg cors "$CORS_ORIGINS" \
+            --arg sb_url "$SUPABASE_URL" \
+            --arg sb_key "$SUPABASE_SERVICE_KEY" \
+            '
+            .containerDefinitions |= map(
+              if .name == $container then
+                .image = $image
+                |
+                .environment = [
+                  { "name": "ENVIRONMENT", "value": $environment },
+                  { "name": "ECS_API_BASE_URL", "value": $api_url },
+                  { "name": "CORS_ORIGINS", "value": $cors },
+                  { "name": "SUPABASE_URL", "value": $sb_url },
+                  { "name": "SUPABASE_SERVICE_KEY", "value": $sb_key }
+                ]
+              else . end
+            )
+            ' task-def-api.json > tmp.json && mv tmp.json task-def-api.json
 
-          echo "UI task definition downloaded."
-
-          jq empty task-def-ui.json
-
-      # ========================================================
-      # RENDER NEW API IMAGE
-      # ========================================================
+      - name: Configure UI task definition environment
+        env:
+          UI_IMAGE: ${{ env.ECR_REGISTRY }}/${{ env.UI_REPOSITORY }}:${{ github.sha }}
+          ECS_UI_CONTAINER_NAME: ${{ vars.ECS_UI_CONTAINER_NAME }}
+          UI_API_URL: ${{ vars.ECS_UI_API_URL || 'http://107.21.90.181:8000' }}
+          ENVIRONMENT: ${{ vars.ENVIRONMENT || 'production' }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL_SECRET_ARN }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY_SECRET_ARN }}
+        run: |
+          set -euo pipefail
+          jq \
+            --arg image "$UI_IMAGE" \
+            --arg container "$ECS_UI_CONTAINER_NAME"             --arg api_url "$UI_API_URL" \
+            --arg environment "$ENVIRONMENT" \
+            --arg sb_url "$SUPABASE_URL" \
+            --arg sb_key "$SUPABASE_SERVICE_KEY" \
+            '
+            .containerDefinitions |= map(
+              if .name == $container then
+                .image = $image
+                |
+                .environment = [
+                  { "name": "ECS_UI_API_URL", "value": $api_url },
+                  { "name": "ENVIRONMENT", "value": $environment },
+                  { "name": "SUPABASE_URL", "value": $sb_url },
+                  { "name": "SUPABASE_SERVICE_KEY", "value": $sb_key }
+                ]
+              else . end
+            )
+            ' task-def-ui.json > tmp.json && mv tmp.json task-def-ui.json
 
       - name: Render API task definition
         id: render-api
@@ -446,10 +299,6 @@ jobs:
           container-name: ${{ vars.ECS_API_CONTAINER_NAME }}
           image: ${{ env.ECR_REGISTRY }}/${{ env.API_REPOSITORY }}:${{ github.sha }}
 
-      # ========================================================
-      # RENDER NEW UI IMAGE
-      # ========================================================
-
       - name: Render UI task definition
         id: render-ui
         uses: aws-actions/amazon-ecs-render-task-definition@v1
@@ -457,34 +306,6 @@ jobs:
           task-definition: task-def-ui.json
           container-name: ${{ vars.ECS_UI_CONTAINER_NAME }}
           image: ${{ env.ECR_REGISTRY }}/${{ env.UI_REPOSITORY }}:${{ github.sha }}
-
-      # ========================================================
-      # VALIDATE RENDERED API TASK DEFINITION
-      # ========================================================
-
-      - name: Validate rendered API task definition
-        run: |
-          set -euo pipefail
-
-          jq empty "${{ steps.render-api.outputs.task-definition }}"
-
-          echo "Rendered API task definition is valid JSON."
-
-      # ========================================================
-      # VALIDATE RENDERED UI TASK DEFINITION
-      # ========================================================
-
-      - name: Validate rendered UI task definition
-        run: |
-          set -euo pipefail
-
-          jq empty "${{ steps.render-ui.outputs.task-definition }}"
-
-          echo "Rendered UI task definition is valid JSON."
-
-      # ========================================================
-      # DEPLOY API TO ECS
-      # ========================================================
 
       - name: Deploy Amazon ECS API Service
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
@@ -494,10 +315,6 @@ jobs:
           cluster: ${{ vars.ECS_CLUSTER }}
           wait-for-service-stability: true
 
-      # ========================================================
-      # DEPLOY UI TO ECS
-      # ========================================================
-
       - name: Deploy Amazon ECS UI Service
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
@@ -505,74 +322,3 @@ jobs:
           service: ${{ vars.ECS_UI_SERVICE }}
           cluster: ${{ vars.ECS_CLUSTER }}
           wait-for-service-stability: true
-
-      # ========================================================
-      # POST-DEPLOYMENT ECS VERIFICATION
-      # ========================================================
-
-      - name: Verify ECS API service
-        env:
-          CLUSTER: ${{ vars.ECS_CLUSTER }}
-          SERVICE: ${{ vars.ECS_API_SERVICE }}
-
-        run: |
-          set -euo pipefail
-
-          echo "Checking API ECS service..."
-
-          aws ecs describe-services \
-            --cluster "$CLUSTER" \
-            --services "$SERVICE" \
-            --query 'services[0].{status:status,running:runningCount,desired:desiredCount,pending:pendingCount}' \
-            --output table
-
-      - name: Verify ECS UI service
-        env:
-          CLUSTER: ${{ vars.ECS_CLUSTER }}
-          SERVICE: ${{ vars.ECS_UI_SERVICE }}
-
-        run: |
-          set -euo pipefail
-
-          echo "Checking UI ECS service..."
-
-          aws ecs describe-services \
-            --cluster "$CLUSTER" \
-            --services "$SERVICE" \
-            --query 'services[0].{status:status,running:runningCount,desired:desiredCount,pending:pendingCount}' \
-            --output table
-
-      # ========================================================
-      # DEPLOYMENT SUMMARY
-      # ========================================================
-
-      - name: Deployment summary
-        env:
-          API_IMAGE: ${{ env.ECR_REGISTRY }}/${{ env.API_REPOSITORY }}:${{ github.sha }}
-          UI_IMAGE: ${{ env.ECR_REGISTRY }}/${{ env.UI_REPOSITORY }}:${{ github.sha }}
-
-        run: |
-          echo ""
-          echo "============================================================"
-          echo "DOCUMENT INTELLIGENCE DEPLOYMENT SUCCESSFUL"
-          echo "============================================================"
-          echo ""
-          echo "Commit:"
-          echo "${GITHUB_SHA}"
-          echo ""
-          echo "API Image:"
-          echo "${API_IMAGE}"
-          echo ""
-          echo "UI Image:"
-          echo "${UI_IMAGE}"
-          echo ""
-          echo "ECS Cluster:"
-          echo "${{ vars.ECS_CLUSTER }}"
-          echo ""
-          echo "API Service:"
-          echo "${{ vars.ECS_API_SERVICE }}"
-          echo ""
-          echo "UI Service:"
-          echo "${{ vars.ECS_UI_SERVICE }}"
-          echo ""
-          echo "============================================================"
