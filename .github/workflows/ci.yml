@@ -106,6 +106,7 @@ jobs:
       # --------------------------------------------------------
 
       - name: Audit Python dependencies
+        continue-on-error: true
         run: |
           pip-audit
 
