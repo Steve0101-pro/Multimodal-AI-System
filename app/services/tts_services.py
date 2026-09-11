@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Initialize the client
 client = genai.Client(api_key=settings.GEMINI_API_KEY.get_secret_value())
-TTS_REQUEST_TIMEOUT_SECONDS = 45
+TTS_REQUEST_TIMEOUT_SECONDS = 120
 
 @traceable(
     name="gemini_text_to_speech",
